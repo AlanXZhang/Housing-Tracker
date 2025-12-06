@@ -393,22 +393,46 @@ def display_listings(listings: list[ListingData]) -> None:
     table = Table(title=f"Found {len(listings)} Listings")
 
     table.add_column("Unit", style="cyan")
+    table.add_column("Plan", style="dim")
     table.add_column("Beds", justify="center")
     table.add_column("Baths", justify="center")
     table.add_column("Sq Ft", justify="right")
     table.add_column("Price", justify="right", style="green")
+    table.add_column("Term", justify="center")
     table.add_column("Floor", justify="center")
     table.add_column("Available", style="yellow")
 
     for listing in listings:
+        # Format bedrooms (0 = Studio, 0.5 = Loft/Studio, 1.5 = 1+Den, etc.)
+        if listing.bedrooms == 0:
+            beds_str = "Studio"
+        elif listing.bedrooms == int(listing.bedrooms):
+            beds_str = str(int(listing.bedrooms))
+        else:
+            beds_str = f"{listing.bedrooms:.1f}"
+
+        # Format bathrooms (1.0 = 1, 1.5 = 1.5)
+        if listing.bathrooms == int(listing.bathrooms):
+            baths_str = str(int(listing.bathrooms))
+        else:
+            baths_str = f"{listing.bathrooms:.1f}"
+
+        # Format available date as MM/DD/YY
+        date_str = listing.available_date.strftime("%m/%d/%y") if listing.available_date else "-"
+
+        # Format lease term
+        term_str = f"{listing.lease_term_months}mo" if listing.lease_term_months else "-"
+
         table.add_row(
             listing.unit_number,
-            str(listing.bedrooms),
-            str(listing.bathrooms),
-            f"{listing.sqft:,}",
-            f"${listing.price:,.0f}",
+            listing.floor_plan_name or "-",
+            beds_str,
+            baths_str,
+            f"{listing.sqft:,}" if listing.sqft else "-",
+            f"${listing.price:,}",
+            term_str,
             str(listing.floor) if listing.floor else "-",
-            listing.available_date.strftime("%b %d") if listing.available_date else "-",
+            date_str,
         )
 
     console.print(table)

@@ -1,5 +1,6 @@
-"""Irvine Company Apartments scraper."""
+"""Irvine Company Apartments scraper - Enhanced data extraction."""
 
+import math
 import re
 from datetime import datetime
 from decimal import Decimal
@@ -14,8 +15,12 @@ from apartment_tracker.scrapers.base import BaseScraper
 class IrvineCompanyScraper(BaseScraper):
     """Scraper for Irvine Company Apartment Homes websites.
 
-    Uses a text-extraction approach since the site has complex dynamic rendering.
-    Clicks all expand buttons first, then extracts all visible unit data.
+    Enhanced to extract:
+    - Floor plan info (beds, baths, sqft range → use minimum)
+    - Lease term
+    - Features
+    - Floor plan image URL
+    - Map position (via View on Map click)
     """
 
     MANAGEMENT_COMPANY = "irvine"
@@ -37,14 +42,20 @@ class IrvineCompanyScraper(BaseScraper):
 
             self.logger.info(f"Scraping {community_name} at {community_address}")
 
+            # First, extract floor plan info (beds, baths, sqft) for each plan
+            floor_plan_info = await self._extract_floor_plan_info(page)
+            self.logger.info(f"Extracted info for {len(floor_plan_info)} floor plans")
+
             # Click all expand buttons to reveal unit data
             await self._expand_all_floor_plans(page)
 
             # Wait for all content to load
             await page.wait_for_timeout(2000)
 
-            # Extract listings from the full page content
-            listings = await self._extract_all_listings(page, community_name, community_address)
+            # Extract listings with enhanced data
+            listings = await self._extract_all_listings(
+                page, community_name, community_address, floor_plan_info
+            )
 
             self.logger.info(f"Found {len(listings)} listings at {community_name}")
             return listings
@@ -64,7 +75,6 @@ class IrvineCompanyScraper(BaseScraper):
     async def get_community_address(self, page: Page) -> str:
         """Extract the community address from the page."""
         try:
-            # Try to find address in the page footer or contact section
             address_el = await page.query_selector('.fapt-community-contact__address, address')
             if address_el:
                 text = await address_el.inner_text()
@@ -74,9 +84,92 @@ class IrvineCompanyScraper(BaseScraper):
             pass
         return "Santa Clara, CA"
 
+    async def _extract_floor_plan_info(self, page: Page) -> dict:
+        """Extract floor plan info (beds, baths, sqft) before expanding.
+
+        Returns a dict mapping floor plan name to {bedrooms, bathrooms, sqft, image_url}.
+        """
+        floor_plans = {}
+
+        try:
+            # Get all floor plan items
+            items = await page.query_selector_all('.fapt-fp-list-item')
+
+            for item in items:
+                try:
+                    text = await item.inner_text()
+
+                    # Extract floor plan name (like "PLAN 01", "PLAN 04B", "PLAN 30 Alt")
+                    name_match = re.search(r'(PLAN\s+\d+[A-Z]?(?:\s+Alt)?)', text, re.I)
+                    plan_name = name_match.group(1).upper() if name_match else None
+
+                    if not plan_name:
+                        continue
+
+                    # Parse bedrooms and bathrooms from format like:
+                    # "Studio / 1 Bath", "1 Bed / 1 Bath", "Den / 1 Bed / 1 Bath"
+                    # "Loft / 2 Bed / 2 Bath", "Loft / Studio / 1 Bath", "Townhome / 2 Bed / 2 Bath"
+                    text_upper = text.upper()
+
+                    # Base bedrooms count
+                    if 'STUDIO' in text_upper:
+                        bedrooms = 0.0
+                    else:
+                        beds_match = re.search(r'(\d+)\s*(?:Bed|BR)', text, re.I)
+                        bedrooms = float(beds_match.group(1)) if beds_match else 1.0
+
+                    # Add 0.5 for Den or Loft prefix
+                    # "Den / 1 Bed" = 1.5, "Loft / 2 Bed" = 2.5, "Loft / Studio" = 0.5
+                    if 'DEN' in text_upper or 'LOFT' in text_upper:
+                        bedrooms += 0.5
+
+                    # Parse bathrooms
+                    baths_match = re.search(r'(\d+)\s*(?:Bath|BA)', text, re.I)
+                    bathrooms = float(baths_match.group(1)) if baths_match else 1.0
+                    # Note: Half baths would need additional parsing if present
+
+                    # Parse sqft - order in card is: Bed/Bath → Price → Sqft
+                    # Format can be "640 - 642" or "1,067 - 1,123" (with commas)
+                    sqft = 0
+                    # Find the price first (pattern like $X,XXX), then look for sqft after
+                    price_pattern = re.search(r'\$[\d,]+', text)
+                    if price_pattern:
+                        after_price = text[price_pattern.end():]
+                        # Match sqft with optional commas: "1,067 - 1,123" or "640 - 642"
+                        sqft_match = re.search(r'([\d,]{3,5})\s*(?:-\s*([\d,]{3,5}))?', after_price)
+                        if sqft_match:
+                            # Remove commas and convert to int
+                            potential_sqft = int(sqft_match.group(1).replace(',', ''))
+                            # Only accept realistic sqft (400-3000 range)
+                            if 400 <= potential_sqft <= 3000:
+                                sqft = potential_sqft
+
+                    # Try to find floor plan image URL
+                    image_url = None
+                    img_el = await item.query_selector('img')
+                    if img_el:
+                        image_url = await img_el.get_attribute('src')
+
+                    floor_plans[plan_name] = {
+                        "bedrooms": bedrooms,
+                        "bathrooms": bathrooms,
+                        "sqft": sqft,
+                        "image_url": image_url,
+                    }
+
+                    self.logger.debug(f"Floor plan {plan_name}: {bedrooms}BR/{bathrooms}BA, {sqft} sqft")
+
+                except Exception as e:
+                    self.logger.debug(f"Error parsing floor plan: {e}")
+                    continue
+
+        except Exception as e:
+            self.logger.warning(f"Error extracting floor plan info: {e}")
+
+        return floor_plans
+
     async def _expand_all_floor_plans(self, page: Page) -> None:
         """Click all expand buttons to reveal unit data."""
-        # Find all expand buttons
         expand_buttons = await page.query_selector_all(
             'button[aria-expanded="false"], '
             '.fapt-fp-list-item__acc-trigger-cta'
@@ -84,22 +177,19 @@ class IrvineCompanyScraper(BaseScraper):
 
         self.logger.info(f"Found {len(expand_buttons)} expand buttons to click")
 
-        # Click each button with a small delay
         for i, button in enumerate(expand_buttons):
             try:
-                # Check if already expanded
                 is_expanded = await button.get_attribute('aria-expanded')
                 if is_expanded == 'true':
                     continue
 
                 await button.click()
-                await page.wait_for_timeout(500)  # Short delay between clicks
+                await page.wait_for_timeout(500)
 
             except Exception as e:
                 self.logger.debug(f"Could not click button {i}: {e}")
                 continue
 
-        # Give time for all content to load
         await page.wait_for_timeout(2000)
 
     async def _extract_all_listings(
@@ -107,205 +197,268 @@ class IrvineCompanyScraper(BaseScraper):
         page: Page,
         community_name: str,
         community_address: str,
+        floor_plan_info: dict,
     ) -> list[ListingData]:
         """Extract all listings from the fully expanded page."""
         listings: list[ListingData] = []
 
-        # Get the full page HTML for parsing
-        # We'll look for the pricing table rows
         try:
-            # Try to get all pricing table rows
-            rows = await page.query_selector_all(
-                '.fapt-fp-pricing-table__row:not(:first-child)'
-            )
+            # Get all floor plan sections for context
+            sections = await page.query_selector_all('.fapt-fp-list-item')
 
-            if rows:
-                self.logger.info(f"Found {len(rows)} pricing table rows")
-                for row in rows:
-                    listing = await self._parse_pricing_row(
-                        row, community_name, community_address, page.url
+            for section in sections:
+                try:
+                    section_text = await section.inner_text()
+
+                    # Get floor plan name for this section (like "PLAN 30", "PLAN 30 Alt")
+                    plan_match = re.search(r'(PLAN\s+\d+[A-Z]?(?:\s+Alt)?)', section_text, re.I)
+                    plan_name = plan_match.group(1).upper() if plan_match else None
+
+                    # Get floor plan details
+                    plan_info = floor_plan_info.get(plan_name, {})
+
+                    # Extract units from this section
+                    section_listings = self._parse_section_units(
+                        section_text,
+                        plan_name,
+                        plan_info,
+                        community_name,
+                        community_address,
+                        page.url,
                     )
-                    if listing:
-                        listings.append(listing)
+                    listings.extend(section_listings)
 
-            # If no structured rows found, fall back to text extraction
-            if not listings:
-                self.logger.info("No structured rows, trying text extraction")
-                listings = await self._extract_from_page_text(
-                    page, community_name, community_address
-                )
+                except Exception as e:
+                    self.logger.debug(f"Error processing section: {e}")
+                    continue
 
         except Exception as e:
             self.logger.warning(f"Error extracting listings: {e}")
 
-        return listings
+        # Deduplicate by unit number
+        seen = set()
+        unique_listings = []
+        for listing in listings:
+            if listing.unit_number not in seen:
+                seen.add(listing.unit_number)
+                unique_listings.append(listing)
 
-    async def _parse_pricing_row(
+        return unique_listings
+
+    def _parse_section_units(
         self,
-        row,
+        section_text: str,
+        plan_name: Optional[str],
+        plan_info: dict,
         community_name: str,
         community_address: str,
         page_url: str,
-    ) -> Optional[ListingData]:
-        """Parse a pricing table row.
-
-        Expected format: Building/Unit | Term | Price | Available | Features | Map
-        """
-        try:
-            text = await row.inner_text()
-
-            # Skip header rows
-            if 'BLDG NO' in text.upper() or 'PRICE' in text.upper() and 'TERM' in text.upper():
-                return None
-
-            # Extract price
-            price_match = re.search(r'\$[\d,]+', text)
-            if not price_match:
-                return None
-            price = Decimal(price_match.group().replace('$', '').replace(',', ''))
-
-            # Skip if price is too low (likely not a unit listing)
-            if price < 1000:
-                return None
-
-            # Extract unit number (format: "04 256" or similar)
-            unit_match = re.search(r'\b(\d{1,2}\s+\d{2,4})\b', text)
-            if unit_match:
-                unit_number = unit_match.group(1).replace(' ', '-')
-            else:
-                # Try alternate format
-                unit_match = re.search(r'(?:apt|unit|#)\s*(\d+)', text, re.I)
-                unit_number = unit_match.group(1) if unit_match else "Unknown"
-
-            # Extract available date
-            date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', text)
-            available_date = None
-            if date_match:
-                try:
-                    available_date = datetime.strptime(date_match.group(1), "%m/%d/%Y")
-                except ValueError:
-                    pass
-
-            # Extract floor
-            floor_match = re.search(r'(\d+)(?:st|nd|rd|th)\s*[Ff]loor', text)
-            floor = int(floor_match.group(1)) if floor_match else None
-
-            # Try to find bedroom/bathroom info nearby
-            # Default to 1BR/1BA, actual values come from floor plan section
-            bedrooms = 1
-            bathrooms = 1
-            sqft = 700  # Default estimate
-
-            beds_match = re.search(r'(\d+)\s*(?:bed|br)', text, re.I)
-            if beds_match:
-                bedrooms = int(beds_match.group(1))
-
-            baths_match = re.search(r'(\d+)\s*(?:bath|ba)', text, re.I)
-            if baths_match:
-                bathrooms = int(baths_match.group(1))
-
-            sqft_match = re.search(r'(\d{3,4})\s*(?:sf|sq)', text, re.I)
-            if sqft_match:
-                sqft = int(sqft_match.group(1))
-
-            return ListingData(
-                community_name=community_name,
-                address=community_address,
-                unit_number=unit_number,
-                price=price,
-                bedrooms=bedrooms,
-                bathrooms=bathrooms,
-                sqft=sqft,
-                floor=floor,
-                available_date=available_date,
-                listing_url=page_url,
-            )
-
-        except Exception as e:
-            self.logger.debug(f"Error parsing row: {e}")
-            return None
-
-    async def _extract_from_page_text(
-        self,
-        page: Page,
-        community_name: str,
-        community_address: str,
     ) -> list[ListingData]:
-        """Extract listings from the full page text content."""
-        listings: list[ListingData] = []
+        """Parse all units from a floor plan section's text."""
+        units: list[ListingData] = []
 
-        try:
-            # Get the main content area
-            content = await page.query_selector('main, .fapt-fp-list, #main-content')
-            if not content:
-                content = await page.query_selector('body')
+        # Pattern to match unit rows:
+        # Building/Unit (like "04 256"), optional term, Price, Date, Features
+        # Example: "04 256 13 mo. $3,095 01/26/2026 2nd Floor, Courtyard view"
 
-            if not content:
-                return listings
+        # Find all price + date patterns
+        pattern = r'(\d{1,2}\s+\d{2,4})\s+(\d+\s*mo\.?)\s+\$?([\d,]+)\s+(\d{1,2}/\d{1,2}/\d{4})\s+([^\$]+?)(?=\d{1,2}\s+\d{2,4}\s+\d+\s*mo|VIEW ON MAP|APPLY NOW|$)'
 
-            text = await content.inner_text()
+        matches = list(re.finditer(pattern, section_text, re.I))
 
-            # Split by price pattern to identify individual units
-            # Pattern: price followed by date
-            unit_pattern = r'(\$[\d,]+)\s+(\d{1,2}/\d{1,2}/\d{4})'
-            matches = list(re.finditer(unit_pattern, text))
-
-            self.logger.info(f"Found {len(matches)} potential units via price pattern")
-
-            # For each match, extract surrounding context
-            for i, match in enumerate(matches):
+        if not matches:
+            # Fallback: simpler pattern
+            simple_pattern = r'\$?([\d,]+)\s+(\d{1,2}/\d{1,2}/\d{4})'
+            for match in re.finditer(simple_pattern, section_text):
                 try:
-                    price_str = match.group(1)
-                    date_str = match.group(2)
-
-                    price = Decimal(price_str.replace('$', '').replace(',', ''))
-
-                    # Skip unreasonable prices
+                    price = Decimal(match.group(1).replace(',', ''))
                     if price < 2000 or price > 10000:
                         continue
 
-                    # Get context before this match (for unit number)
-                    start_pos = max(0, match.start() - 50)
-                    context_before = text[start_pos:match.start()]
+                    date_str = match.group(2)
 
-                    # Get context after (for floor info)
-                    end_pos = min(len(text), match.end() + 100)
-                    context_after = text[match.end():end_pos]
+                    # Find unit number before this price
+                    before_text = section_text[:match.start()]
+                    unit_match = re.search(r'(\d{1,2}\s+\d{2,4})\s*(?:\d+\s*mo\.?)?\s*$', before_text)
+                    unit_number = unit_match.group(1).replace(' ', '-') if unit_match else None
 
-                    # Extract unit number from context before
-                    unit_match = re.search(r'(\d{1,2}\s+\d{2,4})', context_before)
-                    unit_number = unit_match.group(1).replace(' ', '-') if unit_match else f"Unit-{i+1}"
+                    if not unit_number:
+                        continue
 
-                    # Extract floor from context after
-                    floor_match = re.search(r'(\d+)(?:st|nd|rd|th)\s*[Ff]loor', context_after)
+                    # Find lease term
+                    term_match = re.search(r'(\d+)\s*mo\.?', before_text[-30:])
+                    lease_term = int(term_match.group(1)) if term_match else None
+
+                    # Find floor and features after the date
+                    after_text = section_text[match.end():match.end() + 150]
+                    floor_match = re.search(r'(\d+)(?:st|nd|rd|th)\s*[Ff]loor', after_text)
                     floor = int(floor_match.group(1)) if floor_match else None
 
-                    # Parse date
-                    available_date = None
-                    try:
-                        available_date = datetime.strptime(date_str, "%m/%d/%Y")
-                    except ValueError:
-                        pass
+                    # Extract features
+                    features = self._extract_features(after_text)
+
+                    # Parse date with year
+                    available_date = self._parse_date_with_year(date_str)
 
                     listing = ListingData(
                         community_name=community_name,
                         address=community_address,
                         unit_number=unit_number,
-                        price=price,
-                        bedrooms=1,  # Default, will be updated by floor plan context
-                        bathrooms=1,
-                        sqft=700,
+                        price=int(math.ceil(float(price))),
+                        bedrooms=float(plan_info.get("bedrooms", 1.0)),
+                        bathrooms=float(plan_info.get("bathrooms", 1.0)),
+                        sqft=plan_info.get("sqft", 0),
                         floor=floor,
+                        floor_plan_name=plan_name,
+                        floor_plan_image_url=plan_info.get("image_url"),
                         available_date=available_date,
-                        listing_url=page.url,
+                        lease_term_months=lease_term,
+                        features=features,
+                        listing_url=page_url,
                     )
-                    listings.append(listing)
+                    units.append(listing)
 
-                except Exception as e:
-                    self.logger.debug(f"Error extracting unit {i}: {e}")
+                except Exception:
                     continue
 
-        except Exception as e:
-            self.logger.warning(f"Error in text extraction: {e}")
+        else:
+            for match in matches:
+                try:
+                    unit_number = match.group(1).replace(' ', '-')
+                    lease_term_str = match.group(2)
+                    price = Decimal(match.group(3).replace(',', ''))
+                    date_str = match.group(4)
+                    features_text = match.group(5)
 
-        return listings
+                    if price < 2000 or price > 10000:
+                        continue
+
+                    # Parse lease term
+                    term_match = re.search(r'(\d+)', lease_term_str)
+                    lease_term = int(term_match.group(1)) if term_match else None
+
+                    # Parse floor from features
+                    floor_match = re.search(r'(\d+)(?:st|nd|rd|th)\s*[Ff]loor', features_text)
+                    floor = int(floor_match.group(1)) if floor_match else None
+
+                    # Extract features list
+                    features = self._extract_features(features_text)
+
+                    # Parse date with year
+                    available_date = self._parse_date_with_year(date_str)
+
+                    listing = ListingData(
+                        community_name=community_name,
+                        address=community_address,
+                        unit_number=unit_number,
+                        price=int(math.ceil(float(price))),
+                        bedrooms=float(plan_info.get("bedrooms", 1.0)),
+                        bathrooms=float(plan_info.get("bathrooms", 1.0)),
+                        sqft=plan_info.get("sqft", 0),
+                        floor=floor,
+                        floor_plan_name=plan_name,
+                        floor_plan_image_url=plan_info.get("image_url"),
+                        available_date=available_date,
+                        lease_term_months=lease_term,
+                        features=features,
+                        listing_url=page_url,
+                    )
+                    units.append(listing)
+
+                except Exception as e:
+                    self.logger.debug(f"Error parsing unit: {e}")
+                    continue
+
+        return units
+
+    def _extract_features(self, text: str) -> list[str]:
+        """Extract feature list from text."""
+        features = []
+
+        # Common features to look for
+        feature_patterns = [
+            r'(\d+(?:st|nd|rd|th)\s*[Ff]loor)',
+            r'(Courtyard\s*view)',
+            r'(Pool\s*view)',
+            r'(Street\s*view)',
+            r'(Corner\s*unit)',
+            r'(Balcony)',
+            r'(Patio)',
+            r'(Updated)',
+            r'(Renovated)',
+        ]
+
+        for pattern in feature_patterns:
+            match = re.search(pattern, text, re.I)
+            if match:
+                features.append(match.group(1).strip())
+
+        return features
+
+    def _parse_date_with_year(self, date_str: str) -> Optional[datetime]:
+        """Parse date string with full year (MM/DD/YYYY format)."""
+        if not date_str:
+            return None
+
+        date_str = date_str.strip()
+
+        formats = [
+            "%m/%d/%Y",   # 01/26/2026
+            "%m/%d/%y",   # 01/26/26
+        ]
+
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt)
+            except ValueError:
+                continue
+
+        return None
+
+    async def get_unit_map_position(self, page: Page, unit_number: str) -> Optional[dict]:
+        """Click 'View on Map' for a unit to get its position.
+
+        Returns dict with position info for direction detection.
+        """
+        try:
+            # Find the row containing this unit
+            unit_pattern = unit_number.replace('-', ' ')
+
+            # Look for VIEW ON MAP button near this unit
+            buttons = await page.query_selector_all('button, a')
+
+            for button in buttons:
+                text = await button.inner_text()
+                if 'VIEW ON MAP' in text.upper():
+                    # Check if this button is near our unit
+                    parent = await button.evaluate_handle('el => el.closest(".fapt-fp-pricing-table__row")')
+                    if parent:
+                        row_text = await parent.inner_text()
+                        if unit_pattern in row_text:
+                            # Click to open map
+                            await button.click()
+                            await page.wait_for_timeout(2000)
+
+                            # Try to capture the map state
+                            # The map should highlight this unit's position
+                            map_screenshot = await self.take_screenshot(
+                                page, f"unit_map_{unit_number}"
+                            )
+
+                            # Close the map modal if there is one
+                            close_button = await page.query_selector(
+                                '[aria-label="Close"], .modal-close, .close-button'
+                            )
+                            if close_button:
+                                await close_button.click()
+                                await page.wait_for_timeout(500)
+
+                            return {
+                                "unit_number": unit_number,
+                                "map_screenshot": map_screenshot,
+                            }
+
+        except Exception as e:
+            self.logger.warning(f"Error getting map position for {unit_number}: {e}")
+
+        return None

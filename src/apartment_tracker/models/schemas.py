@@ -14,17 +14,19 @@ class ListingData(BaseModel):
     community_name: str
     address: str
     unit_number: str
-    price: Decimal
-    bedrooms: int
-    bathrooms: int
-    sqft: int
+    price: int  # Monthly rent in dollars (rounded up if needed)
+    bedrooms: float  # 0 = studio, 0.5 = loft/studio, 1.5 = 1bed+den, 2.5 = loft/2bed
+    bathrooms: float  # 0.5 = half bath, 1.5 = 1 full + 1 half
+    sqft: int  # Minimum from range (e.g., 1,067-1,123 → 1067)
     listing_url: str
 
     # Optional fields
     floor: Optional[int] = None
     floor_plan_name: Optional[str] = None
     floor_plan_image_url: Optional[str] = None
-    available_date: Optional[datetime] = None
+    available_date: Optional[datetime] = None  # Full date with year
+    lease_term_months: Optional[int] = None  # e.g., 13, 14
+    features: list[str] = Field(default_factory=list)  # e.g., ["2nd Floor", "Courtyard view"]
 
     # LLM-inferred fields (populated later)
     facing_direction: Optional[str] = None
