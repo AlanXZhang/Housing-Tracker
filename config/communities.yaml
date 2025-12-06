@@ -1,0 +1,46 @@
+# Communities to track for availability
+
+communities:
+  # Highest Priority: Irvine Company - Santa Clara Square
+  - name: "Santa Clara Square"
+    management: irvine
+    url: "https://www.irvinecompanyapartments.com/locations/northern-california/santa-clara/santa-clara-square/availability.html"
+    priority: 1
+    enabled: true
+
+  # Prometheus Apartments - Mountain View
+  - name: "100 Moffett"
+    management: prometheus
+    url: "https://prometheusapartments.com/ca/mountain-view-apartments/100-moffett"
+    priority: 2
+    enabled: false  # Enable when prometheus scraper is ready
+
+  - name: "The Dean"
+    management: prometheus
+    url: "https://prometheusapartments.com/ca/mountain-view-apartments/the-dean"
+    priority: 3
+    enabled: false
+
+  - name: "The Tillery"
+    management: prometheus
+    url: "https://prometheusapartments.com/ca/mountain-view-apartments/the-tillery"
+    priority: 4
+    enabled: false
+
+  - name: "The Hadley"
+    management: prometheus
+    url: "https://prometheusapartments.com/ca/mountain-view-apartments/the-hadley"
+    priority: 5
+    enabled: false
+
+  - name: "Montrose"
+    management: prometheus
+    url: "https://prometheusapartments.com/ca/mountain-view-apartments/montrose"
+    priority: 6
+    enabled: false
+
+  - name: "Hearth"
+    management: prometheus
+    url: "https://prometheusapartments.com/ca/santa-clara-apartments/hearth"
+    priority: 7
+    enabled: false
