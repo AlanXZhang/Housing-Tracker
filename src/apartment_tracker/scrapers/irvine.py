@@ -128,21 +128,32 @@ class IrvineCompanyScraper(BaseScraper):
                     bathrooms = float(baths_match.group(1)) if baths_match else 1.0
                     # Note: Half baths would need additional parsing if present
 
-                    # Parse sqft - order in card is: Bed/Bath → Price → Sqft
+                    # Parse sqft - order in card is usually: Bed/Bath → Price → Sqft
+                    # But for "No Availability" plans, there's no price, just: Bed/Bath → "No Availability" → Sqft
                     # Format can be "640 - 642" or "1,067 - 1,123" (with commas)
                     sqft = 0
-                    # Find the price first (pattern like $X,XXX), then look for sqft after
+
+                    # Try 1: Look after price pattern (for available plans)
                     price_pattern = re.search(r'\$[\d,]+', text)
                     if price_pattern:
                         after_price = text[price_pattern.end():]
-                        # Match sqft with optional commas: "1,067 - 1,123" or "640 - 642"
                         sqft_match = re.search(r'([\d,]{3,5})\s*(?:-\s*([\d,]{3,5}))?', after_price)
                         if sqft_match:
-                            # Remove commas and convert to int
                             potential_sqft = int(sqft_match.group(1).replace(',', ''))
-                            # Only accept realistic sqft (400-3000 range)
                             if 400 <= potential_sqft <= 3000:
                                 sqft = potential_sqft
+
+                    # Try 2: Fallback for "No Availability" plans - look after bed/bath pattern
+                    if sqft == 0:
+                        bedbath_match = re.search(r'(?:Studio|Bed)\s*/\s*\d+\s*Baths?', text, re.I)
+                        if bedbath_match:
+                            after_bedbath = text[bedbath_match.end():]
+                            # Skip "No Availability" text if present, then find sqft
+                            sqft_match = re.search(r'([\d,]{3,5})\s*(?:-\s*([\d,]{3,5}))?', after_bedbath)
+                            if sqft_match:
+                                potential_sqft = int(sqft_match.group(1).replace(',', ''))
+                                if 400 <= potential_sqft <= 3000:
+                                    sqft = potential_sqft
 
                     # Try to find floor plan image URL
                     image_url = None
